@@ -9,4 +9,3 @@ pandas
 openpyxl
 python-dotenv
 flask
-huggingface_hub
