@@ -14,17 +14,25 @@ load_dotenv()
 
 app = Flask(__name__)
 app.config['UPLOAD_FOLDER'] = './uploads'
-app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50MB
+app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024
 ALLOWED_EXTENSIONS = {'pdf', 'docx', 'doc', 'xlsx', 'xls'}
 
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
-print("Loading RAG system...")
-vector_store = get_vector_store()
-retriever = vector_store.as_retriever(search_kwargs={"k": 5})
-llm = ChatGroq(model="llama-3.3-70b-versatile", temperature=0)
+# Global variables
+vector_store = None
+retriever = None
+rag_chain = None
 
-prompt = ChatPromptTemplate.from_template("""
+def init_rag():
+    global vector_store, retriever, rag_chain
+    try:
+        print("Loading RAG system...")
+        vector_store = get_vector_store()
+        retriever = vector_store.as_retriever(search_kwargs={"k": 5})
+        llm = ChatGroq(model="llama-3.3-70b-versatile", temperature=0)
+
+        prompt = ChatPromptTemplate.from_template("""
 You are a helpful AI assistant. Answer the question based on the provided context.
 If the answer is not found in the context, say: "I couldn't find information about this in the uploaded documents."
 Be concise and answer in the same language as the question.
@@ -36,15 +44,23 @@ Question: {question}
 
 Answer:""")
 
-def format_docs(docs):
-    return "\n\n".join(doc.page_content for doc in docs)
+        def format_docs(docs):
+            return "\n\n".join(doc.page_content for doc in docs)
 
-rag_chain = (
-    {"context": retriever | format_docs, "question": RunnablePassthrough()}
-    | prompt
-    | llm
-    | StrOutputParser()
-)
+        rag_chain = (
+            {"context": retriever | format_docs, "question": RunnablePassthrough()}
+            | prompt
+            | llm
+            | StrOutputParser()
+        )
+        print("RAG system loaded successfully!")
+        return True
+    except Exception as e:
+        print(f"RAG init error: {e}")
+        return False
+
+# Initialize on startup
+init_rag()
 
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
@@ -53,19 +69,38 @@ def allowed_file(filename):
 def index():
     return render_template('index.html')
 
+@app.route('/health')
+def health():
+    return jsonify({'status': 'ok', 'rag_ready': rag_chain is not None})
+
 @app.route('/chat', methods=['POST'])
 def chat():
-    data = request.get_json()
+    # Robust JSON parsing
+    data = request.get_json(force=True, silent=True)
+    if not data:
+        return jsonify({'error': 'Invalid request format!'}), 400
+
     question = data.get('question', '').strip()
     if not question:
         return jsonify({'error': 'Sawaal khali hai!'}), 400
+
+    if rag_chain is None:
+        return jsonify({'error': 'RAG system abhi load nahi hua. Page refresh karein!'}), 503
+
     try:
         docs = retriever.invoke(question)
         answer = rag_chain.invoke(question)
-        sources = list(set([os.path.basename(doc.metadata.get("source", "")) for doc in docs if doc.metadata.get("source")]))
+        sources = list(set([
+            os.path.basename(doc.metadata.get("source", ""))
+            for doc in docs if doc.metadata.get("source")
+        ]))
         return jsonify({'answer': answer, 'sources': sources})
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        error_msg = str(e)
+        print(f"Chat error: {error_msg}")
+        if "HF_TOKEN" in error_msg or "401" in error_msg or "403" in error_msg:
+            return jsonify({'error': 'HuggingFace token invalid hai! Render pe HF_TOKEN check karein.'}), 500
+        return jsonify({'error': f'Error: {error_msg}'}), 500
 
 @app.route('/upload', methods=['POST'])
 def upload():
@@ -79,6 +114,7 @@ def upload():
         filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
         file.save(filepath)
         add_document(filepath)
+        # Refresh retriever after new doc
         global vector_store, retriever
         vector_store = get_vector_store()
         retriever = vector_store.as_retriever(search_kwargs={"k": 5})
@@ -100,6 +136,6 @@ if __name__ == '__main__':
             print(f"  Mobile pe: http://{local_ip}:{port}")
             print(f"{'='*50}\n")
         except:
-            print(f"Server chal raha hai: http://localhost:{port}")
+            pass
 
     app.run(host='0.0.0.0', port=port, debug=False)
