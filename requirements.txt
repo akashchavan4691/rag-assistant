@@ -1,0 +1,12 @@
+langchain
+langchain-community
+langchain-groq
+langchain-chroma
+chromadb
+pypdf
+docx2txt
+pandas
+openpyxl
+python-dotenv
+flask
+huggingface_hub
